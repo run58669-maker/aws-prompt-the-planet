@@ -1,6 +1,6 @@
 # Anthropic Claude on AWS — Production Prompt Series
 
-A 5-part series of production-ready prompts for the [AWS Prompt the Planet Challenge](https://dorahacks.io/hackathon/awsprompttheplanet/detail). Each prompt generates a complete, deployable Terraform + Lambda bundle for a real Claude-on-AWS production scenario, covering the full AWS Well-Architected Framework.
+A 6-part series of production-ready prompts for the [AWS Prompt the Planet Challenge](https://dorahacks.io/hackathon/awsprompttheplanet/detail). Each prompt generates a complete, deployable Terraform + Lambda bundle for a real Claude-on-AWS production scenario, covering the full AWS Well-Architected Framework.
 
 These are not prompts for Claude to "answer questions about AWS." They are prompts for Claude to **generate the infrastructure code** that ships an AI workload to production.
 
@@ -15,6 +15,7 @@ These are not prompts for Claude to "answer questions about AWS." They are promp
 | 3 | [Custom MCP Server on ECS Fargate](prompts/03-mcp-server-on-ecs-fargate.md) | Reliability | ECS Fargate + ALB hosting Model Context Protocol servers with sticky SSE sessions, SIGTERM graceful drain, two-layer auto scaling, VPC endpoints |
 | 4 | [Production-Grade RAG with Bedrock Knowledge Bases](prompts/04-rag-with-bedrock-kb-citations.md) | Performance Efficiency | Bedrock KB + Claude with hard-contract citations, Haiku groundedness verifier, profile-aware vector store + cache, continuous eval harness with F1 alarm |
 | 5 | [Hybrid Claude Code + Bedrock Fallback](prompts/05-claude-code-hybrid-bedrock-fallback.md) | Operational Excellence | API Gateway + Lambda router that forwards to Anthropic API with transparent Bedrock fallback on rate limits, per-developer usage tracking |
+| 6 | [Production Agentic Loop on AWS](prompts/06-agentic-loop-step-functions.md) | Security | Step Functions-orchestrated Claude tool-use agent with per-tool least-privilege, reversibility-tiered human approval gates, dual cost+step budget, and tool-result injection defense |
 
 ---
 

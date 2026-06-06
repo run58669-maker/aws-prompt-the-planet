@@ -43,7 +43,7 @@ The hybrid is not a way to cut costs — Anthropic API and Bedrock token prices 
 | Variable | Default | Notes |
 |---|---|---|
 | `{{TEAM_PROFILE}}` | `team` | One of `individual` / `team` / `org` — sets Lambda capacity, DynamoDB capacity, alarm thresholds |
-| `{{FALLBACK_MODELS}}` | `["anthropic.claude-opus-4-7-v1:0", "anthropic.claude-sonnet-4-6-v1:0", "anthropic.claude-haiku-4-5-20251001"]` | List of Bedrock model IDs that mirror the Anthropic API model names; the router maps `claude-opus-4-7` (Anthropic) → `anthropic.claude-opus-4-7-v1:0` (Bedrock) etc. |
+| `{{FALLBACK_MODELS}}` | `["us.anthropic.claude-opus-4-7", "us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-haiku-4-5"]` | List of Bedrock **cross-region inference profile** IDs that mirror the Anthropic API model names; the router maps `claude-opus-4-7` (Anthropic) → `us.anthropic.claude-opus-4-7` (Bedrock) etc. These are inference profiles, not bare foundation-model IDs — bare IDs raise ValidationException on current Claude models, and the IAM grants differ (see CONSTRAINT 1). |
 | `{{AUTH_MODE}}` | `iam` | One of `iam` (SigV4 by AWS credentials) / `cognito` (User Pool with hosted UI) / `api_key` (rotating per-developer keys in DDB; least secure, document carefully) |
 | `{{FALLBACK_TRIGGERS}}` | `["429", "5xx", "connection_error", "timeout"]` | HTTP status / error classes that trigger fallback. `4xx` other than 429 are NOT fallback-able (they indicate a request that Bedrock will also reject). |
 | `{{ENABLE_PROMPT_CACHING_PASSTHROUGH}}` | `true` | Forward `cache_control` blocks transparently in both directions |
@@ -118,8 +118,19 @@ You MUST adhere to the following constraints. Each is non-negotiable.
 CONSTRAINT 1 — IAM Least-Privilege
   Router Lambda role:
     - secretsmanager:GetSecretValue scoped to {{ANTHROPIC_API_KEY_SECRET_ARN}}
-    - bedrock:InvokeModel + InvokeModelWithResponseStream scoped to the
-      ARNs in FALLBACK_MODELS in {{REGION}} (explicit list, no wildcards)
+    - bedrock:InvokeModel + InvokeModelWithResponseStream for every entry in
+      FALLBACK_MODELS (explicit list, no wildcards). Each entry is a cross-region
+      INFERENCE PROFILE (e.g. us.anthropic.claude-opus-4-7), not a bare
+      foundation-model ID — current Claude models raise ValidationException on a
+      bare ID. Invoking a profile requires InvokeModel on BOTH the profile ARN AND
+      each underlying foundation-model ARN it routes to, per member region. So for
+      each FALLBACK_MODELS entry grant:
+        - arn:aws:bedrock:{{REGION}}:<account>:inference-profile/<profile-id>
+        - arn:aws:bedrock:<member-region>::foundation-model/<resolved-base-model>
+          for every member region the profile spans (resolve via
+          `aws bedrock get-inference-profile --inference-profile-identifier <id>`)
+      Granting only the profile ARN, or only {{REGION}}'s model ARN, 403s at
+      invoke time on any request the profile routes cross-region.
     - dynamodb:PutItem on the usage table only
     - dynamodb:GetItem on the api-key table only IF AUTH_MODE = api_key
     - cloudwatch logs (separate managed policy)
@@ -286,7 +297,7 @@ CONSTRAINT 6 — EMF Metrics
       "TeamName": "eng-platform",
       "Profile": "team",
       "Provider": "bedrock",
-      "Model": "anthropic.claude-opus-4-7-v1:0",
+      "Model": "us.anthropic.claude-opus-4-7",
       "PrimaryLatencyMs": 0,
       "FallbackLatencyMs": 1430,
       "TotalLatencyMs": 1450,
@@ -336,7 +347,7 @@ CONSTRAINT 7 — Production Readiness Criteria
           create it)
 
 Output Format
-Output six files, each in a fenced code block tagged with its language:
+Output eight files, each in a fenced code block tagged with its language:
   1. main.tf            — provider, variables, locals, EventBridge
                           schedule for usage rollup
   2. iam.tf             — router Lambda role, rollup Lambda role, API

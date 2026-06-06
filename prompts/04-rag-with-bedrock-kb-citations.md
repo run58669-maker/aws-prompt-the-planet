@@ -48,8 +48,8 @@ The vanilla pattern is fine for a hackathon demo. This prompt is the production 
 | `{{VECTOR_STORE}}` | profile-derived (see profile table) | One of `opensearch_serverless` / `aurora_pgvector` / `pinecone_managed` — default is the profile's recommended backend; the OpenSearch Serverless OCU floor makes it wrong for `low_volume` |
 | `{{CACHE_BACKEND}}` | profile-derived (see profile table) | One of `dynamodb` / `elasticache_redis` / `opensearch_knn` — default follows the profile; DynamoDB scan does not scale beyond `low_volume` |
 | `{{EMBEDDING_MODEL}}` | `amazon.titan-embed-text-v2:0` | Embedding model; Titan v2 is the cost/quality default; Cohere `cohere.embed-english-v3` for English-only with marginally better recall |
-| `{{GENERATION_MODEL}}` | `anthropic.claude-opus-4-7-v1:0` | Claude model used for the answer |
-| `{{VERIFIER_MODEL}}` | `anthropic.claude-haiku-4-5-20251001` | Cheap fast Claude used for the groundedness check (Haiku, ~10x cheaper than the generation model) |
+| `{{GENERATION_MODEL}}` | `us.anthropic.claude-opus-4-7` | Claude cross-region inference profile used for the answer (not a bare foundation-model ID — see IAM note in CONSTRAINT 1) |
+| `{{VERIFIER_MODEL}}` | `us.anthropic.claude-haiku-4-5` | Cheap fast Claude inference profile for the groundedness check (Haiku, ~10x cheaper than the generation model) |
 | `{{CHUNK_STRATEGY}}` | `hierarchical` | One of `hierarchical` / `semantic` / `fixed_size` — hierarchical preserves document structure best for technical docs |
 | `{{ENABLE_RERANKING}}` | `true` | Adds a Cohere Rerank stage between retrieve and generate; +1 API call but materially better top-K precision |
 | `{{ENABLE_GUARDRAILS}}` | `true` | Bedrock Guardrails for PII redaction on input and topic/profanity filter on output |
@@ -141,8 +141,19 @@ CONSTRAINT 1 — IAM Least-Privilege (split: ingestion / query / eval / KB)
   Query Lambda role:
     - bedrock:Retrieve scoped to the KB ARN
     - bedrock:InvokeModel scoped to {{GENERATION_MODEL}} +
-      {{VERIFIER_MODEL}} + {{EMBEDDING_MODEL}} ARNs (three distinct
-      models; explicit list, no wildcards)
+      {{VERIFIER_MODEL}} + {{EMBEDDING_MODEL}} (explicit list, no wildcards).
+      IMPORTANT: {{GENERATION_MODEL}} and {{VERIFIER_MODEL}} are cross-region
+      INFERENCE PROFILES (e.g. us.anthropic.claude-opus-4-7) — current Claude
+      models on Bedrock cannot be invoked via a bare foundation-model ARN
+      (ValidationException). Invoking a profile requires InvokeModel on the
+      profile ARN AND on each underlying foundation-model ARN it routes to, in
+      every member region. So for each of these two, grant:
+        - arn:aws:bedrock:<region>:<account>:inference-profile/<profile-id>
+        - arn:aws:bedrock:<member-region>::foundation-model/<resolved-base-model>
+          for every member region (resolve via
+          `aws bedrock get-inference-profile --inference-profile-identifier <id>`)
+      {{EMBEDDING_MODEL}} (Amazon Titan) is invoked directly — grant its plain
+      foundation-model ARN, no profile.
     - bedrock:ApplyGuardrail scoped to the guardrail ARN if
       {{ENABLE_GUARDRAILS}} = true
     - dynamodb:GetItem + PutItem on the cache table only
@@ -376,7 +387,7 @@ CONSTRAINT 6 — Per-Query Cost Attribution via EMF
       },
       "ServiceName": "internal-rag",
       "Profile": "medium_volume",
-      "ModelId": "anthropic.claude-opus-4-7-v1:0",
+      "ModelId": "us.anthropic.claude-opus-4-7",
       "GenerationInputTokens": 4231,
       "GenerationOutputTokens": 512,
       "TotalLatencyMs": 2150,
@@ -666,8 +677,8 @@ Optional (using defaults if omitted):
   - Volume profile: {{VOLUME_PROFILE}} (default: medium_volume)
   - Vector store: {{VECTOR_STORE}} (default: opensearch_serverless)
   - Embedding model: {{EMBEDDING_MODEL}} (default: amazon.titan-embed-text-v2:0)
-  - Generation model: {{GENERATION_MODEL}} (default: anthropic.claude-opus-4-7-v1:0)
-  - Verifier model: {{VERIFIER_MODEL}} (default: anthropic.claude-haiku-4-5-20251001)
+  - Generation model: {{GENERATION_MODEL}} (default: us.anthropic.claude-opus-4-7)
+  - Verifier model: {{VERIFIER_MODEL}} (default: us.anthropic.claude-haiku-4-5)
   - Chunk strategy: {{CHUNK_STRATEGY}} (default: hierarchical)
   - Enable reranking: {{ENABLE_RERANKING}} (default: true)
   - Enable guardrails: {{ENABLE_GUARDRAILS}} (default: true)

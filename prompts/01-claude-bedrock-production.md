@@ -30,7 +30,7 @@ For a production Bedrock workload, Budgets Actions is too slow — a runaway age
 
 | Variable | Description | Example |
 |---|---|---|
-| `{{MODEL_ID}}` | Claude model ID on Bedrock | `anthropic.claude-opus-4-7-v1:0` |
+| `{{MODEL_ID}}` | Claude **cross-region inference profile** ID on Bedrock (not a bare foundation-model ID) | `us.anthropic.claude-opus-4-7` |
 | `{{DAILY_BUDGET_USD}}` | Hard daily cost cap | `50` |
 | `{{LAMBDA_NAME}}` | Lambda function name | `claude-prod-handler` |
 
@@ -68,13 +68,30 @@ and cross-region failover.
 You MUST adhere to the following constraints. Each is non-negotiable.
 
 CONSTRAINT 1 — IAM Least-Privilege
-The Lambda execution role has ONLY:
-  - bedrock:InvokeModel
-  - bedrock:InvokeModelWithResponseStream
-scoped to the specific model ARN in BOTH {{REGION_PRIMARY}} and {{REGION_FAILOVER}}.
-No wildcards on Resource. No broader Bedrock permissions (no ListFoundationModels,
-no GetFoundationModel). Logging permissions (CloudWatch Logs) and CloudWatch metric
-publishing are in a separate managed policy attached to the same role.
+{{MODEL_ID}} is a cross-region INFERENCE PROFILE (e.g. us.anthropic.claude-opus-4-7),
+not a bare foundation-model ID. Current Claude models on Bedrock are invoked through
+an inference profile; calling a bare foundation-model ARN directly returns a
+ValidationException telling you to use an inference profile. This has a non-obvious
+IAM consequence: invoking via a profile requires InvokeModel on the profile ARN AND
+on EACH underlying foundation-model ARN the profile routes to, in every region it
+spans. Granting only the profile ARN (or only one region's model ARN) yields a 403
+at invoke time.
+
+The Lambda execution role has ONLY bedrock:InvokeModel + bedrock:InvokeModelWithResponseStream,
+scoped to ALL of:
+  - the inference-profile ARN:
+      arn:aws:bedrock:{{REGION_PRIMARY}}:<account>:inference-profile/{{MODEL_ID}}
+  - the underlying foundation-model ARN in {{REGION_PRIMARY}}:
+      arn:aws:bedrock:{{REGION_PRIMARY}}::foundation-model/<resolved-base-model-id>
+  - the underlying foundation-model ARN in {{REGION_FAILOVER}}:
+      arn:aws:bedrock:{{REGION_FAILOVER}}::foundation-model/<resolved-base-model-id>
+The base-model ID a profile resolves to is discoverable via
+`aws bedrock get-inference-profile --inference-profile-identifier {{MODEL_ID}}`;
+the generated Terraform must derive these ARNs, not hardcode an account or guess the
+base model. No wildcards on Resource. No broader Bedrock permissions (no
+ListFoundationModels, no GetFoundationModel). Logging permissions (CloudWatch Logs)
+and CloudWatch metric publishing are in a separate managed policy attached to the
+same role.
 
 CONSTRAINT 2 — Real-Time Hard Cost Cap with Two-Layer Kill-Switch
 Implement TWO layers, not just a scheduled check:
@@ -143,7 +160,7 @@ get picked up by CloudWatch as metrics):
         ]
       }]
     },
-    "ModelId": "anthropic.claude-opus-4-7-v1:0",
+    "ModelId": "us.anthropic.claude-opus-4-7",
     "FunctionName": "claude-prod-handler",
     "Region": "us-east-1",
     "BedrockInputTokens": 1234,
@@ -162,11 +179,18 @@ EMF spec:
 https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Embedded_Metric_Format_Specification.html
 
 CONSTRAINT 4 — Cross-Region Failover with Adaptive Retry
+Note on layering: the cross-region inference profile ({{MODEL_ID}}) already load-
+balances capacity across its member regions transparently. The app-level failover
+here is the EXPLICIT belt-and-suspenders for the throttle/timeout cases the profile
+did not absorb — it re-invokes against the failover region's endpoint deterministically
+and makes the event observable, which silent profile-internal routing does not.
+Document this distinction so a reviewer does not read the manual retry as redundant.
+
 On bedrock:InvokeModel returning ThrottlingException, ServiceUnavailable, or
 ModelTimeoutException in {{REGION_PRIMARY}}, retry once in {{REGION_FAILOVER}}.
-Both region's model ARNs must be in the IAM policy. Emit a custom metric
-FailoverInvocations when the failover region serves the request, dimensioned
-by the original failure type.
+The IAM grants from CONSTRAINT 1 already cover both regions' foundation-model ARNs.
+Emit a custom metric FailoverInvocations when the failover region serves the request,
+dimensioned by the original failure type.
 
 In-region retries must use boto3 adaptive retry mode (NOT the default legacy
 mode, which has no jitter and triggers retry storms under throttle):
@@ -255,12 +279,15 @@ After the files, output FOUR sections (in this order):
     At most 7 numbered steps. Assume terraform >= 1.5, AWS CLI v2, AWS
     credentials configured.
 
-    Step 1 (always): Confirm Bedrock model access for {{MODEL_ID}} is granted
-    in BOTH {{REGION_PRIMARY}} and {{REGION_FAILOVER}}. If not granted, request
-    via AWS console → Bedrock → Model access → Modify model access. Approval
-    typically arrives within 1 business day. Do not proceed with terraform
-    apply until access is granted in both regions; the Lambda will fail with
-    AccessDenied otherwise, masking unrelated config errors.
+    Step 1 (always): Confirm Bedrock model access for the foundation model that
+    {{MODEL_ID}} resolves to is granted in BOTH {{REGION_PRIMARY}} and
+    {{REGION_FAILOVER}} (model access is granted on the underlying foundation
+    model, not on the inference profile). Resolve the base model with
+    `aws bedrock get-inference-profile --inference-profile-identifier {{MODEL_ID}}`,
+    then request access via AWS console → Bedrock → Model access → Modify model
+    access in each region. Approval typically arrives within 1 business day. Do
+    not proceed with terraform apply until access is granted in both regions; the
+    Lambda will fail with AccessDenied otherwise, masking unrelated config errors.
 
   Section: Smoke Test
     A single `aws lambda invoke` command. Do NOT use curl: Function URLs in
@@ -351,6 +378,8 @@ Generate the complete deployable bundle per your constraints.
 ## Anti-patterns this prompt prevents
 
 - ❌ Wildcard IAM (`Resource: "*"` on Bedrock actions)
+- ❌ Invoking a bare foundation-model ARN instead of a cross-region inference profile (ValidationException on current Claude models)
+- ❌ Granting InvokeModel on the inference-profile ARN only, omitting the underlying per-region foundation-model ARNs (403 at invoke time)
 - ❌ Hardcoded API keys or model IDs in code
 - ❌ Synchronous PutMetricData calls per invocation
 - ❌ "Set up an alarm" that only emails while spend keeps climbing
